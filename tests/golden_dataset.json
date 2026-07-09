@@ -1,0 +1,63 @@
+[
+  {
+    "id": "g01",
+    "question": "\u00bfQu\u00e9 hay planeado para el d\u00eda 2?",
+    "expected_concept_ids": ["dias/dia-02-tokio"],
+    "expected_facts": ["Senso-ji", "Akihabara", "Shinjuku"]
+  },
+  {
+    "id": "g02",
+    "question": "\u00bfEn qu\u00e9 hotel nos alojamos?",
+    "expected_concept_ids": ["alojamientos/hotel-shibuya"],
+    "expected_facts": ["Hotel Shibuya", "Shibuya-ku, Tokio"]
+  },
+  {
+    "id": "g03",
+    "question": "\u00bfCu\u00e1l es el n\u00famero del vuelo de ida?",
+    "expected_concept_ids": ["vuelos/vuelo-ida"],
+    "expected_facts": ["NH 176"]
+  },
+  {
+    "id": "g04",
+    "question": "\u00bfA qu\u00e9 hora sale el vuelo de vuelta desde Osaka?",
+    "expected_concept_ids": ["vuelos/vuelo-vuelta"],
+    "expected_facts": ["2026-08-15T18:30:00", "Osaka", "KIX"]
+  },
+  {
+    "id": "g05",
+    "question": "\u00bfQu\u00e9 d\u00eda llegamos a Jap\u00f3n?",
+    "expected_concept_ids": ["dias/dia-01-tokio", "vuelos/vuelo-ida"],
+    "expected_facts": ["2026-08-10", "Haneda"]
+  },
+  {
+    "id": "g06",
+    "question": "\u00bfQu\u00e9 visitamos en Kyoto?",
+    "expected_concept_ids": ["dias/dia-03-kyoto"],
+    "expected_facts": ["Fushimi Inari", "Arashiyama"]
+  },
+  {
+    "id": "g07",
+    "question": "\u00bfC\u00f3mo llegamos de Tokio a Kyoto?",
+    "expected_concept_ids": ["dias/dia-03-kyoto"],
+    "expected_facts": ["shinkansen"]
+  },
+  {
+    "id": "g08",
+    "question": "\u00bfCu\u00e1les son todos los d\u00edas del itinerario que tienen el tag 'japon'?",
+    "expected_concept_ids": ["dias/dia-01-tokio", "dias/dia-03-kyoto"],
+    "expected_facts": ["dia-01-tokio", "dia-03-kyoto"],
+    "notes": "dia-02-tokio usa el tag 'jp', no 'japon' todavia -- no deberia aparecer aca hasta que se canonice."
+  },
+  {
+    "id": "g09",
+    "question": "\u00bfHay desayuno incluido en el hotel?",
+    "expected_concept_ids": ["alojamientos/hotel-shibuya"],
+    "expected_facts": ["Desayuno no incluido"]
+  },
+  {
+    "id": "g10",
+    "question": "\u00bfQu\u00e9 aerol\u00ednea opera los vuelos?",
+    "expected_concept_ids": ["vuelos/vuelo-ida", "vuelos/vuelo-vuelta"],
+    "expected_facts": ["ANA"]
+  }
+]
