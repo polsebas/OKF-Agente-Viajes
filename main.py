@@ -21,9 +21,37 @@ from agents.travel_agent import ask, create_travel_agent  # noqa: E402
 from core.config import get_vault_root  # noqa: E402
 
 
+def _extract_text(response) -> str:
+    """Saca el texto util para la consola. Nunca hace fallback a str(RunOutput)
+    — eso tira el objeto entero (system prompt, metrics, etc.) y rompe el REPL."""
+    content = getattr(response, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if content is not None and not isinstance(content, str):
+        return str(content).strip()
+
+    # Ultimo mensaje assistant con texto (por si content del run quedo vacio).
+    messages = getattr(response, "messages", None) or []
+    for message in reversed(messages):
+        if getattr(message, "role", None) != "assistant":
+            continue
+        text = getattr(message, "content", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    tools = getattr(response, "tools", None) or []
+    tool_names = [getattr(t, "tool_name", "?") for t in tools]
+    if tool_names:
+        return (
+            "(El modelo no devolvio texto. Tools usadas: "
+            + ", ".join(tool_names)
+            + ". Proba reformular la pregunta.)"
+        )
+    return "(El modelo no devolvio respuesta de texto.)"
+
+
 def _print_response(response) -> None:
-    content = getattr(response, "content", None) or str(response)
-    print(f"\nagente>\n{content}\n")
+    print(f"\nagente>\n{_extract_text(response)}\n")
 
 
 def run_once(message: str) -> None:

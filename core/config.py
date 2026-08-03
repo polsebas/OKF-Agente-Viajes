@@ -68,7 +68,3 @@ def get_vault_root() -> str:
 
 def get_tag_similarity_threshold() -> float:
     return float(os.getenv("OKF_TAG_SIMILARITY_THRESHOLD", "0.82"))
-
-
-def get_tag_canonicalization_auto_apply() -> bool:
-    return os.getenv("OKF_TAG_CANONICALIZATION_AUTO_APPLY", "false").strip().lower() == "true"

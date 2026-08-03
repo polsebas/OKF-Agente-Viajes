@@ -1,0 +1,16 @@
+.venv/
+.git/
+.gitignore
+.env
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.okf_meta/
+uv.lock.bak
+fixtures/sample_vault/.git/
+tests/
+README.md
+.dockerignore
+Dockerfile

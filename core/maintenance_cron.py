@@ -2,8 +2,7 @@
 
 Ningun tool de este modulo se expone al agente Agno. `apply_tag_rewrite`
 vive exclusivamente aca: es codigo determinista (edicion de YAML), nunca una
-completion de LLM, y solo corre si `auto_apply=True` — que por default es
-False.
+completion de LLM, y solo corre tras aprobacion humana explicita del plan.
 """
 
 import logging
@@ -16,13 +15,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from core.config import (
     get_judge_model,
-    get_tag_canonicalization_auto_apply,
     get_tag_similarity_threshold,
     get_vault_root,
 )
+from core.maintenance_report import write_maintenance_report
 from core.validation_engine import build_default_engine
 from schemas.okf_concept import OKFConcept
-from schemas.tag_taxonomy import TagMergeCandidate, TagMergePlan
+from schemas.tag_taxonomy import TagMergeCandidate, TagMergePlan, TagTaxonomy
 from schemas.validation import ValidationResult
 from tools.okf_adapter import parse_bundle
 from tools.tag_taxonomy import find_candidate_synonyms, load_taxonomy, resolve_tag
@@ -30,6 +29,11 @@ from tools.tag_taxonomy import find_candidate_synonyms, load_taxonomy, resolve_t
 logger = logging.getLogger("okf_travel_agent.maintenance_cron")
 
 PENDING_MERGES_DIRNAME = ".okf_meta/pending_merges"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_TAXONOMY_SNAPSHOT = (
+    "skills/tag-taxonomy-conventions/references/taxonomy-snapshot.md"
+)
+_CANONICALIZATION_WEEKDAY = 6  # domingo (datetime.weekday: lunes=0)
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +73,37 @@ def _known_tags(bundle: dict[str, OKFConcept]) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Job 2: canonicalizacion de tags.
+# Job 2: canonicalizacion de tags — solo propone, nunca aplica.
 # ---------------------------------------------------------------------------
+
+
+def _plans_dir(bundle_root: str) -> Path:
+    return Path(bundle_root) / PENDING_MERGES_DIRNAME
+
+
+def _load_plan(bundle_root: str, plan_id: str) -> TagMergePlan:
+    plan_path = _plans_dir(bundle_root) / f"{plan_id}.json"
+    return TagMergePlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+
+
+def _load_all_plans(bundle_root: str) -> list[TagMergePlan]:
+    plans_path = _plans_dir(bundle_root)
+    if not plans_path.exists():
+        return []
+    plans = []
+    for plan_path in sorted(plans_path.glob("*.json")):
+        plans.append(TagMergePlan.model_validate_json(plan_path.read_text(encoding="utf-8")))
+    return plans
+
+
+def _count_pending_plans(bundle_root: str) -> int:
+    return sum(1 for plan in _load_all_plans(bundle_root) if plan.status == "pending")
+
+
+def _persist_plan(vault_root: str, plan: TagMergePlan) -> None:
+    plans_dir = _plans_dir(vault_root)
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    (plans_dir / f"{plan.plan_id}.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
 
 
 def _tags_in_use(bundle: dict[str, OKFConcept]) -> set[str]:
@@ -176,31 +209,16 @@ def _judge_candidates(candidates: list[TagMergeCandidate]) -> list[TagMergeCandi
     return judged
 
 
-def _persist_plan(vault_root: str, plan: TagMergePlan) -> None:
-    plans_dir = Path(vault_root) / PENDING_MERGES_DIRNAME
-    plans_dir.mkdir(parents=True, exist_ok=True)
-    (plans_dir / f"{plan.plan_id}.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
-
-
 def run_tag_canonicalization(
     bundle_root: str | None = None,
-    auto_apply: bool | None = None,
     use_judge: bool = False,
-) -> TagMergePlan:
+) -> list[TagMergePlan]:
     """
-    1. Parse bundle, load taxonomy.
-    2. Collect all tags in use, find those not in taxonomy.
-    3. find_candidate_synonyms() -> embedding-based candidates.
-    4. Optional: pase de juez LLM acotado (use_judge=True) para llenar
-       `rationale` y confirmar/rechazar — unico lugar donde un LLM toca el
-       pipeline de tags, nunca escribe archivos.
-    5. Persiste el TagMergePlan en .okf_meta/pending_merges/.
-    6. Si auto_apply=True: reescribe frontmatter de forma determinista,
-       re-valida el bundle completo, commit git. Si la validacion post-
-       rewrite falla, revierte el commit automaticamente.
+    Always PROPOSES only. Never applies. Writes TagMergePlan objects with
+    status='pending' to .okf_meta/pending_merges/. Returns the plans created
+    this run, for the report.
     """
     bundle_root = bundle_root or get_vault_root()
-    auto_apply = get_tag_canonicalization_auto_apply() if auto_apply is None else auto_apply
 
     bundle = parse_bundle(bundle_root)
     taxonomy = load_taxonomy(bundle)
@@ -211,27 +229,55 @@ def run_tag_canonicalization(
     if use_judge and candidates:
         candidates = _judge_candidates(candidates)
 
+    actionable = [c for c in candidates if c.similarity_score > 0.0]
+    if not actionable:
+        return []
+
     plan = TagMergePlan(
         plan_id=str(uuid.uuid4()),
         created_at=datetime.now(timezone.utc).isoformat(),
-        candidates=candidates,
+        candidates=actionable,
         status="pending",
     )
     _persist_plan(bundle_root, plan)
-
-    if auto_apply:
-        _apply_tag_rewrite(bundle_root, plan)
-
-    return plan
+    return [plan]
 
 
 # ---------------------------------------------------------------------------
 # apply_tag_rewrite: NUNCA se expone como tool de Agno. Codigo puramente
-# determinista, invocado solo desde este cron cuando auto_apply=True.
+# determinista, invocado solo desde apply_approved_plans tras aprobacion humana.
 # ---------------------------------------------------------------------------
 
 
-def _apply_tag_rewrite(bundle_root: str, plan: TagMergePlan) -> ValidationResult:
+def regenerate_taxonomy_snapshot(
+    taxonomy: TagTaxonomy,
+    output_path: str = _DEFAULT_TAXONOMY_SNAPSHOT,
+) -> None:
+    """
+    Pure deterministic serialization of TagTaxonomy -> the markdown reference
+    file consumed by the tag-taxonomy-conventions runtime skill.
+    Called only from apply_tag_rewrite's success path. Never called from
+    agent-facing code — the running agent reads this file, it does not write it.
+    """
+    lines = ["<!-- AUTO-GENERATED by core/maintenance_cron.py — do not edit by hand -->"]
+    for entry in taxonomy.entries.values():
+        lines.append(f"## {entry.canonical}")
+        lines.append(f"canonical: {entry.canonical}")
+        lines.append(f"aliases: [{', '.join(entry.aliases)}]")
+        lines.append(f"children: [{', '.join(entry.children)}]")
+        lines.append("")
+    path = Path(output_path)
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _apply_tag_rewrite(
+    bundle_root: str,
+    plan: TagMergePlan,
+    snapshot_path: str = _DEFAULT_TAXONOMY_SNAPSHOT,
+) -> ValidationResult:
     from tools.okf_adapter import _git_commit, _write_concept_file, invalidate_bundle_cache
 
     bundle = parse_bundle(bundle_root)
@@ -243,7 +289,9 @@ def _apply_tag_rewrite(bundle_root: str, plan: TagMergePlan) -> ValidationResult
             tag_rewrite_map[tag] = candidate.proposed_canonical
 
     if not tag_rewrite_map:
-        plan.status = "rejected"
+        plan.status = "failed"
+        plan.failure_reason = "El plan no tiene candidatos accionables para reescribir."
+        _persist_plan(bundle_root, plan)
         return ValidationResult(passed=True, issues=[])
 
     touched_concept_ids = []
@@ -265,8 +313,6 @@ def _apply_tag_rewrite(bundle_root: str, plan: TagMergePlan) -> ValidationResult
     result = engine.validate_bundle(bundle)
 
     commit_message = f"agent: apply_tag_rewrite on {len(touched_concept_ids)} concepts"
-    _git_commit(bundle_root, commit_message)
-
     from git import Repo
 
     repo = Repo(bundle_root)
@@ -275,39 +321,93 @@ def _apply_tag_rewrite(bundle_root: str, plan: TagMergePlan) -> ValidationResult
         logger.error(
             "apply_tag_rewrite dejo el bundle invalido, revirtiendo commit: %s", result.issues
         )
+        _git_commit(bundle_root, commit_message)
         repo.git.revert("--no-edit", "HEAD")
-        plan.status = "rejected"
+        plan.status = "failed"
+        plan.failure_reason = (
+            f"Validacion post-rewrite fallo con {len(result.issues)} issue(s); commit revertido."
+        )
     else:
+        # Solo tras validate_bundle OK: regenera el snapshot del skill y
+        # committea junto con los cambios de contenido (si el path cae
+        # dentro del vault, git add -A lo incluye en el mismo commit).
+        regenerate_taxonomy_snapshot(load_taxonomy(bundle), output_path=snapshot_path)
+        _git_commit(bundle_root, commit_message)
         plan.status = "applied"
+        plan.failure_reason = None
 
     invalidate_bundle_cache()
     _persist_plan(bundle_root, plan)
     return result
 
 
+def apply_approved_plans(
+    bundle_root: str | None = None,
+    snapshot_path: str = _DEFAULT_TAXONOMY_SNAPSHOT,
+) -> list[TagMergePlan]:
+    """
+    Scans .okf_meta/pending_merges/*.json for status == 'approved' only.
+    For each: applies the rewrite (deterministic code, same as
+    apply_tag_rewrite from the base prompt), re-validates the bundle,
+    commits to git, sets status -> 'applied' on success or 'failed' with a
+    reason on failure (kept, not deleted). Plans still 'pending' are left
+    untouched — this function never applies anything a human hasn't
+    explicitly approved.
+    Returns the list of plans it acted on, for the report.
+    """
+    bundle_root = bundle_root or get_vault_root()
+    acted_on: list[TagMergePlan] = []
+
+    for plan in _load_all_plans(bundle_root):
+        if plan.status != "approved":
+            continue
+        _apply_tag_rewrite(bundle_root, plan, snapshot_path=snapshot_path)
+        acted_on.append(_load_plan(bundle_root, plan.plan_id))
+
+    return acted_on
+
+
 # ---------------------------------------------------------------------------
-# Scheduling: integridad nocturna, canonicalizacion semanal. auto_apply
-# queda en False por default y NO se hardcodea en True — es una decision
-# abierta que el usuario debe revisar tras varias corridas en dry-run.
+# Orchestrador nocturno + scheduling unico.
 # ---------------------------------------------------------------------------
+
+
+def run_nightly_maintenance(bundle_root: str | None = None) -> None:
+    """
+    The single scheduled entrypoint. Orchestrates:
+      1. run_integrity_scan() — every night
+      2. run_tag_canonicalization() — only on the scheduled weekly day
+      3. apply_approved_plans() — every night (cheap no-op if nothing approved)
+    Then calls write_maintenance_report() ONCE with the combined results.
+    """
+    bundle_root = bundle_root or get_vault_root()
+
+    integrity_result = run_integrity_scan(bundle_root)
+
+    new_candidates: list[TagMergePlan] = []
+    if datetime.now(timezone.utc).weekday() == _CANONICALIZATION_WEEKDAY:
+        new_candidates = run_tag_canonicalization(bundle_root)
+
+    applied_plans = apply_approved_plans(bundle_root)
+    pending_count = _count_pending_plans(bundle_root)
+
+    write_maintenance_report(
+        integrity_result=integrity_result,
+        new_candidates=new_candidates,
+        applied_plans=applied_plans,
+        pending_count=pending_count,
+        bundle_root=bundle_root,
+    )
 
 
 def start_scheduler(bundle_root: str | None = None) -> BackgroundScheduler:
     bundle_root = bundle_root or get_vault_root()
     scheduler = BackgroundScheduler()
     scheduler.add_job(
-        run_integrity_scan,
+        run_nightly_maintenance,
         CronTrigger(hour=3, minute=0),
         args=[bundle_root],
-        id="okf_integrity_scan_nightly",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        run_tag_canonicalization,
-        CronTrigger(day_of_week="sun", hour=4, minute=0),
-        args=[bundle_root],
-        kwargs={"auto_apply": get_tag_canonicalization_auto_apply()},
-        id="okf_tag_canonicalization_weekly",
+        id="okf_nightly_maintenance",
         replace_existing=True,
     )
     scheduler.start()

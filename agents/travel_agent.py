@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 
 from agno.agent import Agent
+from agno.skills import LocalSkills, Skills
 
 from core.config import get_fallback_models, get_resilient_model, get_vault_root
 from schemas.okf_concept import OKFConcept
@@ -25,7 +26,9 @@ from tools.okf_adapter import (
 )
 from tools.tag_taxonomy import load_taxonomy
 
-_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "travel_itinerary_agent_v1.md"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROMPT_PATH = _PROJECT_ROOT / "prompts" / "travel_itinerary_agent_v1.md"
+_SKILLS_DIR = _PROJECT_ROOT / "skills"
 
 with open(_PROMPT_PATH, encoding="utf-8") as f:
     instructions = f.read()
@@ -39,22 +42,52 @@ WRITE_TOOL_NAMES = {"create_concept", "append_to_concept"}
 # ---------------------------------------------------------------------------
 
 
+def _index_like_concept(bundle: dict[str, OKFConcept]) -> OKFConcept | None:
+    """Prefiere index.md; si no existe, un dashboard/indice tipico de vault Obsidian."""
+    for concept_id in ("index", "00 - Dashboard", "00 - Índice", "00 - Indice"):
+        concept = bundle.get(concept_id)
+        if concept is not None:
+            return concept
+    for concept in bundle.values():
+        if concept.type.lower() in {"dashboard", "index", "indice"}:
+            return concept
+    return None
+
+
 def build_world_state(bundle: dict[str, OKFConcept]) -> str:
     """Snapshot liviano para el placeholder [WORLD_STATE] de la constitucion.
-    Nunca incluye el body completo de un concept que no sea index.md. El
-    agente decide, con las tools, que concept completo necesita traer."""
+    Nunca incluye el body completo de un concept que no sea index/dashboard.
+    El agente decide, con las tools, que concept completo necesita traer."""
     counts = Counter(concept.type for concept in bundle.values())
-    index_concept = bundle.get("index")
-    index_summary = index_concept.body.strip() if index_concept else "(sin index.md en el bundle)"
+    index_concept = _index_like_concept(bundle)
+    if index_concept is None:
+        index_summary = "(sin index/dashboard en el bundle)"
+    else:
+        # Cap para que un dashboard largo no inunde el contexto del agente.
+        raw = index_concept.body.strip()
+        index_summary = raw if len(raw) <= 1200 else raw[:1200].rstrip() + "…"
     taxonomy = load_taxonomy(bundle)
     canonical_tags = sorted(taxonomy.entries.keys())
 
+    # Catalogo corto: ciudades/notas raiz, no los N dias (eso escala mal).
+    root_ids = sorted(
+        cid
+        for cid, concept in bundle.items()
+        if not cid.startswith("dias/") and concept.type != "tag-taxonomy"
+    )
+    if len(root_ids) > 40:
+        shown = ", ".join(root_ids[:40]) + f" … (+{len(root_ids) - 40} mas)"
+    else:
+        shown = ", ".join(root_ids)
+    day_count = sum(1 for cid in bundle if cid.startswith("dias/"))
     return "\n".join(
         [
             f"Fecha actual: {date.today().isoformat()}",
             f"Conceptos por type: {dict(sorted(counts.items()))}",
+            f"Concept_ids (no-day): {shown}",
+            f"Concepts type=day: {day_count} (usar get_day_itinerary o list_okf_concepts type=day)",
             f"Tags canonicos en la taxonomia: {canonical_tags}",
-            "Arbol de index.md:",
+            "Arbol de index/dashboard:",
             index_summary,
         ]
     )
@@ -144,12 +177,20 @@ def make_validation_stuck_state_hook(tracker: ValidationFailureTracker):
 # ---------------------------------------------------------------------------
 
 
-def create_travel_agent(tracker: ValidationFailureTracker | None = None) -> Agent:
+def create_travel_agent(
+    tracker: ValidationFailureTracker | None = None,
+    *,
+    enable_skills: bool = False,
+) -> Agent:
+    """Por default sin Skills: Agno inyecta get_skill_* y los modelos chicos
+    las usan para 'leer' el itinerario (ej. get_skill_script(...05 - Xian.md)),
+    en vez de query_okf_concept. Las skills siguen disponibles con
+    enable_skills=True para sesiones de escritura/conformancia."""
     tracker = tracker or ValidationFailureTracker()
-    return Agent(
-        model=get_resilient_model(),
-        fallback_models=get_fallback_models(),
-        tools=[
+    kwargs: dict = {
+        "model": get_resilient_model(),
+        "fallback_models": get_fallback_models(),
+        "tools": [
             list_okf_concepts,
             query_okf_concept,
             get_day_itinerary,
@@ -157,12 +198,17 @@ def create_travel_agent(tracker: ValidationFailureTracker | None = None) -> Agen
             append_to_concept,
             propose_tag_merge,
         ],
-        instructions=instructions,
-        tool_call_limit=6,  # levemente por encima del usual 5 — los flujos de escritura necesitan un paso mas
-        tool_hooks=[make_validation_stuck_state_hook(tracker)],
-        add_dependencies_to_context=True,
-        markdown=True,
-    )
+        "instructions": instructions,
+        "tool_call_limit": 6,  # levemente por encima del usual 5 — escritura necesita un paso mas
+        "tool_hooks": [make_validation_stuck_state_hook(tracker)],
+        "add_dependencies_to_context": True,
+        # markdown=False: Agno inyecta "Use markdown…" y los modelos chicos
+        # arman reviews con headings. Las respuestas factuales son una oracion.
+        "markdown": False,
+    }
+    if enable_skills:
+        kwargs["skills"] = Skills(loaders=[LocalSkills(str(_SKILLS_DIR))])
+    return Agent(**kwargs)
 
 
 def ask(agent: Agent, message: str, dependencies: dict | None = None):

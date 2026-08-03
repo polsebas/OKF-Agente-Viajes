@@ -91,11 +91,21 @@ def _concept_from_post(concept_id: str, post: frontmatter.Post) -> OKFConcept:
     if isinstance(tags, str):
         tags = [tags]
     links = sorted({_resolve_link(m.group(1), concept_id) for m in _LINK_RE.finditer(post.content)})
-    extra = {k: v for k, v in metadata.items() if k not in _MODELED_FRONTMATTER_KEYS}
+    # Compat Obsidian: `tipo` se acepta como alias de `type` (OKF).
+    concept_type = (metadata.get("type") or metadata.get("tipo") or "") or ""
+    if isinstance(concept_type, str):
+        concept_type = concept_type.strip()
+    else:
+        concept_type = str(concept_type)
+    extra = {
+        k: v
+        for k, v in metadata.items()
+        if k not in _MODELED_FRONTMATTER_KEYS and k != "tipo"
+    }
     return OKFConcept(
         concept_id=concept_id,
-        type=metadata.get("type", "") or "",
-        title=metadata.get("title"),
+        type=concept_type,
+        title=metadata.get("title") or metadata.get("ciudad"),
         description=metadata.get("description"),
         resource=metadata.get("resource"),
         tags=list(tags),
@@ -144,42 +154,86 @@ def invalidate_bundle_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
+_LIST_BODY_PREVIEW_CHARS = 280
+
+
+def _catalog_view(concept: OKFConcept) -> OKFConcept:
+    """Vista de catalogo: metadata + preview corto del body. El body completo
+    solo se obtiene via query_okf_concept (Recuperacion Selectiva)."""
+    preview = " ".join(concept.body.split())
+    if len(preview) > _LIST_BODY_PREVIEW_CHARS:
+        preview = preview[:_LIST_BODY_PREVIEW_CHARS].rstrip() + "…"
+    description = concept.description
+    if not description:
+        fechas = concept.extra_frontmatter.get("fechas")
+        if fechas:
+            description = f"fechas: {fechas}"
+    return concept.model_copy(update={"body": preview, "description": description})
+
+
 @tool
-def list_okf_concepts(type: str | None = None, tag: str | None = None) -> list[OKFConcept]:
+def list_okf_concepts(type: str | None = None, tag: str | None = None) -> list[OKFConcept] | str:
     """Lista concepts del bundle OKF, opcionalmente filtrando por `type` y/o `tag`.
-    Herramienta de solo lectura, nunca modifica el vault."""
+    El filtro de type es case-insensitive. Devuelve un catalogo liviano:
+    metadata + preview corto del body (no el contenido completo). Para leer
+    un concept entero, usa query_okf_concept. Si no hay matches, devolvé un
+    mensaje explicito (no una lista vacia silenciosa). Herramienta de solo
+    lectura, nunca modifica el vault."""
     bundle = _load_bundle()
+    type_norm = type.strip().lower() if type else None
     results = []
     for concept in bundle.values():
-        if type is not None and concept.type != type:
+        if type_norm is not None and concept.type.strip().lower() != type_norm:
             continue
         if tag is not None and tag not in concept.tags:
             continue
-        results.append(concept)
+        results.append(_catalog_view(concept))
+    if not results:
+        available = sorted({c.type for c in bundle.values() if c.type}) or ["(ninguno)"]
+        return (
+            f"No hay concepts que coincidan (type={type!r}, tag={tag!r}). "
+            f"Types presentes en el vault: {available}. "
+            "Reintentá sin filtro de type, o con uno de esos values."
+        )
     return results
 
 
 @tool
-def query_okf_concept(concept_id: str) -> OKFConcept | None:
-    """Busca un concept por su concept_id exacto. Devuelve None si no existe
-    — el agente debe interpretar None como 'no esta en el vault', nunca
-    inventar el dato."""
+def query_okf_concept(concept_id: str) -> OKFConcept | str:
+    """Busca un concept por su concept_id exacto y devuelve el contenido
+    completo. Si no existe, devolvé un mensaje explicito — nunca inventes el
+    dato. Preferi esta tool solo para el/los concept_id concretos que
+    necesitas, no para recorrer el vault entero."""
     bundle = _load_bundle()
-    return bundle.get(concept_id)
+    concept = bundle.get(concept_id)
+    if concept is None:
+        return (
+            f"No existe ningun concept con concept_id '{concept_id}' en el vault. "
+            "Usá list_okf_concepts para ver los ids disponibles."
+        )
+    return concept
 
 
 @tool
-def get_day_itinerary(date: str) -> OKFConcept | None:
+def get_day_itinerary(date: str) -> OKFConcept | str:
     """Busca el concept de type 'day' cuyo timestamp coincide con `date`
-    (formato YYYY-MM-DD)."""
+    (formato YYYY-MM-DD). Solo sirve si el vault tiene concepts tipados como
+    'day' con timestamp. Si este vault usa otros types (p.ej. Ciudad), usá
+    list_okf_concepts + query_okf_concept en su lugar."""
     target = datetime.fromisoformat(date).date()
     bundle = _load_bundle()
     for concept in bundle.values():
-        if concept.type != "day":
+        if concept.type.strip().lower() != "day":
             continue
         if concept.timestamp is not None and concept.timestamp.date() == target:
             return concept
-    return None
+    day_count = sum(1 for c in bundle.values() if c.type.strip().lower() == "day")
+    return (
+        f"No hay concept type=day con timestamp {target.isoformat()}. "
+        f"Concepts type=day en el vault: {day_count}. "
+        "Si el itinerario usa otros types (p.ej. Ciudad), usá list_okf_concepts "
+        "sin filtro o filtrando por ese type, y despues query_okf_concept."
+    )
 
 
 # ---------------------------------------------------------------------------

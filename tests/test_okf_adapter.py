@@ -58,12 +58,22 @@ def test_get_day_itinerary_matches_by_date(temp_vault):
     assert result.concept_id == "dias/dia-02-tokio"
 
 
-def test_get_day_itinerary_missing_date_returns_none(temp_vault):
-    assert get_day_itinerary.entrypoint(date="2026-01-01") is None
+def test_get_day_itinerary_missing_date_returns_explicit_message(temp_vault):
+    result = get_day_itinerary.entrypoint(date="2026-01-01")
+    assert isinstance(result, str)
+    assert "No hay concept type=day" in result
 
 
-def test_query_okf_concept_missing_returns_none(temp_vault):
-    assert query_okf_concept.entrypoint(concept_id="vuelos/vuelo-fantasma") is None
+def test_query_okf_concept_missing_returns_explicit_message(temp_vault):
+    result = query_okf_concept.entrypoint(concept_id="vuelos/vuelo-fantasma")
+    assert isinstance(result, str)
+    assert "No existe ningun concept" in result
+
+
+def test_list_okf_concepts_unknown_type_returns_explicit_message(temp_vault):
+    result = list_okf_concepts.entrypoint(type="day-that-does-not-exist", tag=None)
+    assert isinstance(result, str)
+    assert "No hay concepts que coincidan" in result
 
 
 def test_list_okf_concepts_filters_by_type_and_tag(temp_vault):
@@ -76,6 +86,15 @@ def test_list_okf_concepts_filters_by_type_and_tag(temp_vault):
 
     kyoto_days = list_okf_concepts.entrypoint(type="day", tag="kyoto")
     assert {c.concept_id for c in kyoto_days} == {"dias/dia-03-kyoto"}
+
+
+def test_list_okf_concepts_returns_catalog_preview_not_full_body(temp_vault):
+    listed = {c.concept_id: c for c in list_okf_concepts.entrypoint()}
+    full = query_okf_concept.entrypoint(concept_id="dias/dia-03-kyoto")
+    assert full is not None
+    assert "Fushimi Inari" in full.body
+    assert len(listed["dias/dia-03-kyoto"].body) < len(full.body)
+    assert len(listed["dias/dia-03-kyoto"].body) <= 281
 
 
 # ---------------------------------------------------------------------------

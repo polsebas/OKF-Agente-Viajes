@@ -23,4 +23,5 @@ class TagMergePlan(BaseModel):
     plan_id: str
     created_at: str
     candidates: list[TagMergeCandidate]
-    status: str = "pending"  # pending | approved | applied | rejected
+    status: str = "pending"  # pending | approved | applied | rejected | failed
+    failure_reason: str | None = None
