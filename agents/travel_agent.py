@@ -6,7 +6,8 @@ archivo por 'apply_tag_rewrite' no debe haber ningun resultado.
 """
 
 from collections import Counter
-from datetime import date
+from collections.abc import Callable
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from agno.agent import Agent
@@ -141,12 +142,18 @@ def _extract_concept_id(arguments: dict) -> str | None:
     return frontmatter.get("concept_id")
 
 
-def make_validation_stuck_state_hook(tracker: ValidationFailureTracker):
+def make_validation_stuck_state_hook(
+    tracker: ValidationFailureTracker,
+    on_tool_failure: Callable[[str, str], None] | None = None,
+):
     """Tool hook (Ent. 2.4 / Arq. 5.2): envuelve create_concept y
     append_to_concept. Deja pasar el primer fallo tal cual (Error as
     Observation, Arq. 5.4). Al segundo fallo consecutivo sobre el mismo
     concept_id, reemplaza la excepcion por un System Prompt Interrupt
-    explicito."""
+    explicito.
+
+    Si hay adaptador de memoria, el fallo tambien se registra como
+    ``TOOL_FAILURE`` (el callback decide la categoria)."""
 
     def hook(function_name: str, function_call, arguments: dict):
         if function_name not in WRITE_TOOL_NAMES:
@@ -156,6 +163,8 @@ def make_validation_stuck_state_hook(tracker: ValidationFailureTracker):
         try:
             result = function_call(**arguments)
         except OKFValidationError as exc:
+            if on_tool_failure is not None:
+                on_tool_failure(concept_id or function_name, str(exc))
             if concept_id:
                 failures = tracker.record_failure(concept_id)
                 if failures >= ValidationFailureTracker.THRESHOLD:
@@ -181,26 +190,47 @@ def create_travel_agent(
     tracker: ValidationFailureTracker | None = None,
     *,
     enable_skills: bool = False,
+    memory_adapter=None,
 ) -> Agent:
     """Por default sin Skills: Agno inyecta get_skill_* y los modelos chicos
     las usan para 'leer' el itinerario (ej. get_skill_script(...05 - Xian.md)),
     en vez de query_okf_concept. Las skills siguen disponibles con
     enable_skills=True para sesiones de escritura/conformancia."""
     tracker = tracker or ValidationFailureTracker()
+
+    def _record_tool_failure(concept_id: str, detail: str) -> None:
+        memory_adapter.record_tool_failure(
+            passage=detail,
+            resource=concept_id,
+            detail=detail,
+            as_of=datetime.now(timezone.utc),
+        )
+
+    tools = [
+        list_okf_concepts,
+        query_okf_concept,
+        get_day_itinerary,
+        create_concept,
+        append_to_concept,
+        propose_tag_merge,
+    ]
+    if memory_adapter is not None and memory_adapter.supports_drilldown:
+        from tools.memory_tools import build_expand_fact_evidence_tool
+
+        tools.append(build_expand_fact_evidence_tool(memory_adapter))
+
     kwargs: dict = {
         "model": get_resilient_model(),
         "fallback_models": get_fallback_models(),
-        "tools": [
-            list_okf_concepts,
-            query_okf_concept,
-            get_day_itinerary,
-            create_concept,
-            append_to_concept,
-            propose_tag_merge,
-        ],
+        "tools": tools,
         "instructions": instructions,
         "tool_call_limit": 6,  # levemente por encima del usual 5 — escritura necesita un paso mas
-        "tool_hooks": [make_validation_stuck_state_hook(tracker)],
+        "tool_hooks": [
+            make_validation_stuck_state_hook(
+                tracker,
+                on_tool_failure=_record_tool_failure if memory_adapter is not None else None,
+            )
+        ],
         "add_dependencies_to_context": True,
         # markdown=False: Agno inyecta "Use markdown…" y los modelos chicos
         # arman reviews con headings. Las respuestas factuales son una oracion.
