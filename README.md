@@ -153,6 +153,41 @@ okf_travel_agent/
 
 ---
 
+## Arquitectura de Memoria y Trazabilidad en Producción (`memgraphrag-core`)
+
+Este repositorio es el caso de uso de dominio: un agente de itinerario sobre un vault Obsidian tratado como bundle OKF. La memoria de producción —evidencia cruda, hechos aceptados y trazabilidad de lo que se rechazó— es el contrato de [memgraphrag-core](https://github.com/polsebas/memgraphrag-core) (`polsebas/memgraphrag-core`).
+
+El motor guarda una memoria global de tres capas y recupera con Personalized PageRank guiado por esa memoria, más un rerank híbrido entre similitud vectorial y puntaje estructural. Los agentes de indexación (`A_ext`, `A_det`, `A_res`) también están escritos con [Agno](https://docs.agno.com/), igual que este itinerario. Acá el modelo interpreta el pedido y elige qué nota leer. En el banco de reservas, el bucle PRAO escribe en el mismo motor y decide el turno siguiente solo con lo que el adaptador inyecta.
+
+| Capa del motor | Qué persiste | En este dominio |
+| --- | --- | --- |
+| `M_pas` | Pasajes: texto fuente, para grounding y trazabilidad | El cuerpo de cada concepto OKF y el turno crudo (por ejemplo la edad y la dieta dichas al pasar). El hecho comprimido no reemplaza ese texto. |
+| `M_ont` | Esquemas `(tipo, relación, tipo)`, estables solo si la frecuencia alcanza `tau` | Tipos de concepto, links entre notas y taxonomía de tags. Un merge se propone; el chat no lo aplica. |
+| `M_fac` | Hechos instanciados, ligados al esquema estable y a los pasajes que los evidencian | Un dato que pasó validación, un rechazo del viajero, un `HTTP 409` o una tarifa con `ttl_seconds`. |
+
+La topología que materializa el motor es `Schema --INSTANTIATES--> Fact --EVIDENCE_IN--> Passage`. Una respuesta factual del itinerario sale de `query_okf_concept`, `get_day_itinerary` o `list_okf_concepts`. En el cierre de una reserva, el dato exacto del pasajero sale de `expand_fact_evidence` sobre `M_pas`.
+
+Tres adaptadores comparten esa interfaz para la comparación. `FlatSummarizerAdapter` comprime el log y busca en el resumen. `MemGraphRAGLegacyAdapter` usa el grafo sin categoría de proceso y sin vencimiento. `MemGraphRAGV2Adapter` activa `FactCategory` (`HARD_CONSTRAINT`, `REJECTED_OPTION`, `TOOL_FAILURE`), la poda por `ttl_seconds` dentro del PPR y el drill-down al pasaje. La corrida está en `python -m evaluation.run_effectiveness_suite` y la tabla queda en [evaluation/RESULTS.md](evaluation/RESULTS.md).
+
+### MemoryTax: el techo lo pone quien escribe la memoria
+
+[MemoryTax](https://arxiv.org/abs/2610.29823) (*The Bitter Lesson of Agent Memory*, arXiv:2610.29823) compara memorias diseñadas (Mem0, Zep) con el contexto completo y con agentes que buscan el historial crudo. El hallazgo que fija este dominio: la memoria tiene un techo puesto por el modelo que la escribe. Un lector más fuerte no recupera el tramo que el escritor no guardó. En el grafo Zep escrito por GPT-4o-mini, GPT-4o-mini, GPT-6 Luna y Claude Opus 5.5 quedan en 43 %, 43 % y 45 %. En el grafo escrito por Claude Opus 5.5, los mismos lectores llegan a 66 %, 71 % y 87 %.
+
+Por eso `M_fac` y `M_ont` no sustituyen a `M_pas`. El contexto selectivo de cada turno (conteos por tipo, índice, tags canónicos, fecha de hoy) es un puntero al vault. El precio de un hotel que nadie escribió sigue ausente. En el banco, la edad de la nena y la dieta celíaca viven en el pasaje del turno 2; el hecho comprimido solo dice «restricción alimentaria», y V2 la recupera leyendo `M_pas`.
+
+### MemDev-Bench: conservar el proceso y juzgar si sigue vigente
+
+[MemDev-Bench](https://arxiv.org/abs/2610.27524) (*Does Memory Help Code Agents?*, arXiv:2610.27524) mide sistemas de memoria sobre historiales reales de repositorio: 555 tareas base y 4.869 tareas históricas anotadas por relevancia. La memoria ayuda a localizar y editar, y también hace fallar tareas que el agente resolvía sin ella, porque reutiliza una guía vieja sin revisar si todavía aplica. Entregar la trayectoria cruda, en el orden en que ocurrió, acorta el proceso: guarda intentos fallidos, revisiones y resultados que las memorias comprimidas suelen descartar.
+
+En este agente esos eventos ya son parte del contrato, y el motor los distingue en producción:
+
+- Un write inválido o un `HTTP 409` de Hotel Norte es un rechazo. La herramienta falla, el archivo no cambia y Git no commitea. V2 lo guarda como `TOOL_FAILURE` para no reintentar el mismo cupo en el cierre.
+- «No inventar vuelos, precios ni direcciones» y «no aplicar un merge de tags desde el chat» son restricciones negativas. `propose_tag_merge` propone. El job de mantenimiento aplica, y solo si hay un plan aprobado. El rechazo de una escala en Miami queda como `REJECTED_OPTION`.
+- `append_to_concept` agrega texto al cuerpo existente. La nota anterior queda en el archivo y en la historia de Git, con el `concept_id` en el mensaje del commit.
+- La vigencia es explícita. Una tarifa aérea nace con `ttl_seconds`. Cuando el reloj pasa ese plazo, el PPR la saca del contexto y el agente vuelve a cotizar en el escritorio determinista, en vez de repetir el importe vencido.
+
+---
+
 ## License / status
 
 Personal tooling prototype — shape your vault, adjust `.env`, and treat the sample itinerary as a safe sandbox before pointing the agent at a live Obsidian vault.
