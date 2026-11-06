@@ -11,6 +11,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] in {"--consola", "consola"}:
+    from evaluation.console import main as console_main
+
+    raise SystemExit(console_main(sys.argv[2:]))
+
 from dotenv import load_dotenv
 
 # Carga .env antes de importar el agente (que construye el modelo al importar).

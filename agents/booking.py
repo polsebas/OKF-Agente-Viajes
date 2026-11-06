@@ -28,16 +28,31 @@ BUDGET_USD = "3500 USD"
 
 
 class BookingDesk:
+    """Inventario chico. Hotel Norte abre sin cupo: el 409 es la respuesta del escritorio."""
+
     def __init__(self) -> None:
         self.quote_issued_at: datetime | None = None
+        self.inventory = {HOTEL_NORTE: 0, HOTEL_PRADO: 5}
+        self.attempts: list[str] = []
+
+    def has_room(self, name: str) -> bool:
+        return self.inventory.get(name, 0) > 0
+
+    def alternative_to(self, name: str) -> str | None:
+        for candidate, rooms in self.inventory.items():
+            if candidate != name and rooms > 0:
+                return candidate
+        return None
 
     def book_hotel(self, name: str) -> str:
-        if name == HOTEL_NORTE:
+        self.attempts.append(name)
+        if not self.has_room(name):
             raise BookingConflict(
-                HOTEL_NORTE,
+                name,
                 409,
-                "Conflict: sin cupo en Hotel Norte",
+                f"Conflict: sin cupo en {name}",
             )
+        self.inventory[name] -= 1
         return f"reserva confirmada en {name}"
 
     def quote_flight(self, as_of: datetime) -> int:

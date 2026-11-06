@@ -187,6 +187,36 @@ def test_v2_agent_exposes_drilldown_tool_and_the_default_registry_does_not():
     assert plain_names <= v2_names
 
 
+def test_v2_recovers_the_409_and_does_not_ask_norte_again():
+    from datetime import timedelta
+
+    from agents.booking import HOTEL_NORTE, HOTEL_PRADO, BookingDesk
+    from evaluation.scenario import ScenarioTurn
+
+    adapter = build_memory_adapter(MemoryMode.V2)
+    desk = BookingDesk()
+    loop = TravelPraoLoop(adapter, desk)
+    traces = asyncio.run(loop.run(SCENARIO))
+    booked = next(trace for trace in traces if trace.kind == "book")
+    assert "409" in booked.observation
+    assert HOTEL_PRADO in booked.observation
+    assert desk.attempts.count(HOTEL_NORTE) == 1
+
+    again = asyncio.run(
+        loop.step(
+            ScenarioTurn(
+                index=13,
+                kind="book",
+                user="Reservá el Hotel Norte otra vez.",
+                as_of=SCENARIO[-1].as_of + timedelta(minutes=5),
+            )
+        )
+    )
+    assert again.hotel == HOTEL_PRADO
+    assert "No lo reintento" in again.observation
+    assert desk.attempts.count(HOTEL_NORTE) == 1
+
+
 def test_prao_loop_is_the_runtime_under_test():
     adapter = build_memory_adapter(MemoryMode.V2)
     traces = asyncio.run(TravelPraoLoop(adapter).run(SCENARIO[:1]))
