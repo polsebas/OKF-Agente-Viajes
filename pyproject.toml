@@ -15,6 +15,7 @@ dependencies = [
     "anthropic>=0.40",
     "ollama>=0.4",
     "python-dotenv>=1.0",
+    "memgraphrag-core",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +26,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agents", "core", "tools", "schemas"]
+packages = ["agents", "core", "tools", "schemas", "memory", "evaluation"]
+
+# Checkout local con FactCategory, expand_fact_evidence y poda TTL.
+# Desde el directorio padre (OKF-Agente-VIajes) es `pip install -e ../memgraphrag-core`.
+# Desde este paquete el mismo árbol queda en ../../memgraphrag-core.
+# Sin checkout: uv add "memgraphrag-core @ git+https://github.com/polsebas/memgraphrag-core.git"
+[tool.uv.sources]
+memgraphrag-core = { path = "../../memgraphrag-core", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
