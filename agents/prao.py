@@ -125,7 +125,7 @@ class TravelPraoLoop:
 
     async def _act(self, turn, view: MemoryView, trace: TurnTrace) -> None:
         if turn.kind == "book":
-            await self._try_book(HOTEL_NORTE, trace, repeated=False)
+            await self._book_with_recovery(view, trace)
             return
         if turn.kind == "quote":
             price = self.desk.quote_flight(turn.as_of)
@@ -158,8 +158,10 @@ class TravelPraoLoop:
             trace.repeated_failure = hotel == HOTEL_NORTE
             if hotel == HOTEL_NORTE:
                 await self._try_book(hotel, trace, repeated=True)
+                booking_result = trace.observation
             else:
-                trace.notes.append(self.desk.book_hotel(hotel))
+                booking_result = self.desk.book_hotel(hotel)
+                trace.notes.append(booking_result)
             aside = next((fact for fact in view.facts if fact.relation == "HAS_ASIDE"), None)
             if aside is not None and self.memory.supports_drilldown:
                 trace.drilldown_text = self.memory.expand_fact_evidence(aside.fact_id)
@@ -168,10 +170,36 @@ class TravelPraoLoop:
                 recalled = view.prompt
             trace.raw_details_found = _count_details(recalled)
             trace.observation = (
-                f"Cierre: vuelo {trace.route}; hotel {hotel}; detalle recuperado: {recalled}"
+                f"Cierre: vuelo {trace.route}; hotel {hotel}. {booking_result} "
+                f"Detalle recuperado: {recalled}"
             )
             return
         trace.observation = _distractor_observation(turn.kind)
+
+    async def _book_with_recovery(self, view: MemoryView, trace: TurnTrace) -> None:
+        """El 409 de Hotel Norte se guarda. La estadía sigue en un hotel con cupo."""
+        if _blocks_hotel(view, HOTEL_NORTE):
+            confirmation = self.desk.book_hotel(HOTEL_PRADO)
+            trace.hotel = HOTEL_PRADO
+            trace.repeated_failure = False
+            trace.observation = (
+                "Hotel Norte ya respondió HTTP 409 (sin cupo). "
+                f"No lo reintento. {confirmation}."
+            )
+            trace.notes.append(confirmation)
+            return
+        await self._try_book(HOTEL_NORTE, trace, repeated=False)
+        if "409" not in trace.observation:
+            return
+        alternative = self.desk.alternative_to(HOTEL_NORTE)
+        if alternative is None:
+            return
+        confirmation = self.desk.book_hotel(alternative)
+        trace.notes.append(confirmation)
+        trace.observation = (
+            f"{trace.observation}\n"
+            f"No reintento {HOTEL_NORTE}. {confirmation}."
+        )
 
     async def _try_book(self, hotel: str, trace: TurnTrace, *, repeated: bool) -> None:
         trace.hotel = hotel
@@ -234,7 +262,7 @@ class TravelPraoLoop:
                 )
             )
             return
-        if turn.kind == "book":
+        if turn.kind == "book" and trace.hotel == HOTEL_NORTE and "409" in trace.observation:
             await self.memory.awrite(
                 FactWrite(
                     passage=trace.observation,
